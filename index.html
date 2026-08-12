@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>私人助理语音</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0a0a0a; color: #fff; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+      padding: 20px; -webkit-tap-highlight-color: transparent;
+    }
+    h1 { font-size: 18px; font-weight: 600; margin-bottom: 30px; color: #888; }
+    #status {
+      font-size: 14px; color: #666; margin-bottom: 20px; text-align: center;
+      min-height: 20px;
+    }
+    #status.connected { color: #4ade80; }
+    #status.connecting { color: #fbbf24; }
+    #status.error { color: #f87171; }
+    .btn {
+      width: 100%; max-width: 340px; height: 56px; border: none;
+      border-radius: 28px; font-size: 17px; font-weight: 600;
+      cursor: pointer; transition: all 0.3s; margin-bottom: 12px;
+    }
+    #connectBtn {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff;
+    }
+    #connectBtn:active { transform: scale(0.97); }
+    #connectBtn.connected {
+      background: linear-gradient(135deg, #ef4444, #dc2626);
+    }
+    #muteBtn {
+      background: #1a1a1a; color: #888; border: 1px solid #333;
+    }
+    #muteBtn.active { background: #fbbf24; color: #000; border-color: #fbbf24; }
+    #muteBtn:disabled { opacity: 0.4; }
+    #transcript {
+      width: 100%; max-width: 380px; margin-top: 20px; flex: 1;
+      overflow-y: auto; -webkit-overflow-scrolling: touch;
+    }
+    .msg {
+      padding: 12px 16px; margin-bottom: 8px; border-radius: 14px;
+      font-size: 15px; line-height: 1.6; word-break: break-word;
+    }
+    .msg.user {
+      background: #1e293b; margin-left: 40px; text-align: right;
+    }
+    .msg.assistant {
+      background: #1a1a2e; margin-right: 40px;
+    }
+    .msg .role { font-size: 11px; color: #666; margin-bottom: 4px; }
+    .indicator {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 6px; vertical-align: middle;
+    }
+    .indicator.listening { background: #4ade80; animation: pulse 1.5s infinite; }
+    .indicator.speaking { background: #8b5cf6; animation: pulse 1.5s infinite; }
+    .indicator.idle { background: #555; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .hint { font-size: 12px; color: #555; text-align: center; margin-top: 16px; }
+    #setup {
+      width: 100%; max-width: 340px; margin-top: 40px;
+    }
+    #setup p { font-size: 14px; color: #888; margin-bottom: 12px; text-align: center; }
+    #setup input {
+      width: 100%; height: 44px; background: #1a1a1a; color: #fff;
+      border: 1px solid #333; border-radius: 12px; padding: 0 16px;
+      font-size: 14px; margin-bottom: 12px;
+    }
+    #setup button {
+      width: 100%; height: 44px; border: none; border-radius: 12px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff;
+      font-size: 15px; font-weight: 600; cursor: pointer;
+    }
+    #debug {
+      width: 100%; max-width: 380px; margin-top: 16px;
+      font-size: 11px; color: #555; font-family: monospace;
+      max-height: 120px; overflow-y: auto; display: none;
+    }
+    #debug.visible { display: block; }
+    .debug-line { padding: 2px 0; border-bottom: 1px solid #1a1a1a; }
+  </style>
+</head>
+<body>
+  <h1>🎙️ 私人助理语音</h1>
+  <div id="status">
+    <span class="indicator idle"></span>未连接
+  </div>
+  <button class="btn" id="connectBtn" style="display:none">连接语音</button>
+  <button class="btn" id="muteBtn" disabled>静音</button>
+  <div id="transcript"></div>
+  <div class="hint" id="mainHint">连接后直接说话，AI自动应答</div>
+  <div id="debug"></div>
+
+  <div id="setup">
+    <p>首次使用，请输入密钥（仅需一次）</p>
+    <input type="password" id="patInput" placeholder="粘贴你的PAT密钥" autocomplete="off">
+    <button id="saveBtn">保存并开始</button>
+  </div>
+
+<script>
+// ===== 配置 =====
+const BOT_ID = '7673056964410277914';
+let PAT = '';
+
+// 从 localStorage 或 URL 参数读取 PAT
+function loadPAT() {
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlPAT = urlParams.get('pat');
+  if (urlPAT) {
+    localStorage.setItem('coze_pat', urlPAT);
+    urlParams.delete('pat');
+    const newUrl = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '');
+    window.history.replaceState({}, '', newUrl);
+    return urlPAT;
+  }
+  return localStorage.getItem('coze_pat') || '';
+}
+
+function getWSUrl() {
+  return `wss://ws.coze.cn/v1/chat?bot_id=${BOT_ID}&authorization=Bearer ${PAT}`;
+}
+
+// ===== 调试日志 =====
+const debugEl = document.getElementById('debug');
+function debug(msg) {
+  console.log('[voice-app]', msg);
+  const line = document.createElement('div');
+  line.className = 'debug-line';
+  line.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  debugEl.appendChild(line);
+  debugEl.scrollTop = debugEl.scrollHeight;
+  if (debugEl.children.length > 50) {
+    debugEl.removeChild(debugEl.firstChild);
+  }
+}
+
+// ===== AudioWorklet 处理器代码 =====
+const workletCode = `
+class PCMCaptureProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const input = inputs[0];
+    if (input && input[0] && input[0].length > 0) {
+      const float32 = input[0];
+      const int16 = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        const s = Math.max(-1, Math.min(1, float32[i]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      this.port.postMessage(int16.buffer, [int16.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PCMCaptureProcessor);
+`;
+
+// ===== 状态变量 =====
+let ws = null;
+let audioContext = null;
+let mediaStream = null;
+let workletNode = null;
+let sourceNode = null;
+let isConnected = false;
+let isMuted = false;
+let isAiSpeaking = false;
+let nextPlayTime = 0;
+let chatReady = false;  // 是否已收到 conversation.chat.created
+let actualSampleRate = 24000;
+
+// ===== DOM =====
+const statusEl = document.getElementById('status');
+const connectBtn = document.getElementById('connectBtn');
+const muteBtn = document.getElementById('muteBtn');
+const transcriptEl = document.getElementById('transcript');
+const setupEl = document.getElementById('setup');
+const patInput = document.getElementById('patInput');
+const saveBtn = document.getElementById('saveBtn');
+
+// ===== 初始化 =====
+PAT = loadPAT();
+if (PAT) {
+  setupEl.style.display = 'none';
+  connectBtn.style.display = 'block';
+}
+
+// ===== 工具函数 =====
+function setStatus(text, state) {
+  let cls = '';
+  let dot = 'idle';
+  if (state === 'connected') { cls = 'connected'; dot = 'listening'; }
+  else if (state === 'connecting') { cls = 'connecting'; dot = 'idle'; }
+  else if (state === 'error') { cls = 'error'; dot = 'idle'; }
+  statusEl.className = cls;
+  statusEl.innerHTML = `<span class="indicator ${dot}"></span>${text}`;
+}
+
+function addMessage(role, content) {
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  const roleLabel = role === 'user' ? '我' : '助理';
+  div.innerHTML = `<div class="role">${roleLabel}</div>${content}`;
+  transcriptEl.appendChild(div);
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function updateLastMessage(role, content) {
+  const msgs = transcriptEl.querySelectorAll(`.msg.${role}`);
+  if (msgs.length > 0) {
+    const last = msgs[msgs.length - 1];
+    const roleEl = last.querySelector('.role');
+    if (roleEl) {
+      let next = roleEl.nextSibling;
+      if (next) {
+        next.textContent = content;
+      } else {
+        last.appendChild(document.createTextNode(content));
+      }
+    }
+  } else {
+    addMessage(role, content);
+  }
+  transcriptEl.scrollTop = transcriptEl.scrollHeight;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 8192;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + chunk, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function int16ToFloat32(buffer) {
+  const view = new DataView(buffer);
+  const float32 = new Float32Array(buffer.byteLength / 2);
+  for (let i = 0; i < float32.length; i++) {
+    float32[i] = view.getInt16(i * 2, true) / 32768;
+  }
+  return float32;
+}
+
+let eventId = 0;
+function genEventId() {
+  return `evt_${Date.now()}_${eventId++}`;
+}
+
+// ===== WebSocket 发送 =====
+function sendEvent(eventType, data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    const event = {
+      id: genEventId(),
+      event_type: eventType,
+      data: data || {}
+    };
+    const msg = JSON.stringify(event);
+    ws.send(msg);
+    debug('SEND ' + eventType);
+  }
+}
+
+// ===== 发送 chat.update 配置事件 =====
+function sendChatUpdate() {
+  debug('Sending chat.update, sample_rate=' + actualSampleRate);
+  sendEvent('chat.update', {
+    input_audio: {
+      format: 'pcm',
+      codec: 'pcm',
+      sample_rate: actualSampleRate,
+      channel: 1,
+      bit_depth: 16
+    },
+    output_audio: {
+      codec: 'pcm',
+      pcm_config: {
+        sample_rate: 24000
+      }
+    }
+  });
+}
+
+// ===== 音频播放 =====
+function playAudioChunk(base64Data) {
+  if (!audioContext) return;
+  
+  try {
+    const arrayBuffer = base64ToArrayBuffer(base64Data);
+    const float32 = int16ToFloat32(arrayBuffer);
+    
+    if (float32.length === 0) return;
+    
+    const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+    audioBuffer.copyToChannel(float32, 0);
+    
+    const source = audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioContext.destination);
+    
+    const now = audioContext.currentTime;
+    if (nextPlayTime < now) {
+      nextPlayTime = now;
+    }
+    
+    source.start(nextPlayTime);
+    nextPlayTime = nextPlayTime + audioBuffer.duration;
+  } catch (e) {
+    debug('Audio playback error: ' + e.message);
+  }
+}
+
+// ===== WebSocket 消息处理 =====
+function handleWebSocketMessage(event) {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch (e) {
+    return;
+  }
+  
+  // 兼容带/不带 server. 前缀的事件名
+  const rawEventType = data.event_type || data.type || '';
+  const eventType = rawEventType.startsWith('server.') ? rawEventType.substring(7) : rawEventType;
+  const payload = data.data || {};
+  
+  debug('RECV ' + rawEventType);
+  
+  switch (eventType) {
+    case 'conversation.chat.created':
+      debug('Chat session created, ready to send audio');
+      chatReady = true;
+      setStatus('已连接，开始说话吧', 'connected');
+      connectBtn.textContent = '断开连接';
+      connectBtn.classList.add('connected');
+      muteBtn.disabled = false;
+      break;
+    
+    case 'conversation.audio_transcript.update':
+    case 'conversation.audio_transcript.completed':
+      if (payload.content) {
+        updateLastMessage('user', payload.content);
+      }
+      break;
+    
+    case 'conversation.message.delta':
+    case 'conversation.message.completed':
+      if (payload.content) {
+        updateLastMessage('assistant', payload.content);
+      }
+      break;
+    
+    case 'conversation.audio.delta':
+      if (payload.delta) {
+        playAudioChunk(payload.delta);
+        isAiSpeaking = true;
+        if (isConnected) {
+          setStatus('助理说话中…', 'connected');
+        }
+      }
+      break;
+    
+    case 'conversation.audio.completed':
+      isAiSpeaking = false;
+      if (isConnected) {
+        setStatus('已连接，请说话', 'connected');
+      }
+      break;
+    
+    case 'input_audio_buffer.speech_started':
+      if (isConnected) {
+        setStatus('正在听…', 'connected');
+      }
+      break;
+    
+    case 'input_audio_buffer.speech_stopped':
+      if (isConnected && !isAiSpeaking) {
+        setStatus('思考中…', 'connected');
+      }
+      break;
+    
+    case 'conversation.cleared':
+      transcriptEl.innerHTML = '';
+      break;
+    
+    case 'error':
+      debug('Server error: ' + JSON.stringify(payload));
+      setStatus('服务错误: ' + (payload.message || payload.msg || payload.code || '未知错误'), 'error');
+      break;
+    
+    default:
+      debug('Unhandled event: ' + eventType + ' data=' + JSON.stringify(payload).substring(0, 200));
+      break;
+  }
+}
+
+// ===== 连接 =====
+async function connect() {
+  if (isConnected) {
+    disconnect();
+    return;
+  }
+  
+  if (!PAT) {
+    setupEl.style.display = 'block';
+    connectBtn.style.display = 'none';
+    return;
+  }
+  
+  setStatus('连接中…', 'connecting');
+  connectBtn.textContent = '连接中…';
+  chatReady = false;
+  debugEl.classList.add('visible');
+  
+  try {
+    // 1. 先设置音频捕获
+    debug('Requesting microphone access...');
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      }
+    });
+    debug('Microphone access granted');
+    
+    // 2. 创建 AudioContext（尝试24kHz，失败则用默认）
+    try {
+      audioContext = new AudioContext({ sampleRate: 24000 });
+    } catch (e) {
+      audioContext = new AudioContext();
+    }
+    actualSampleRate = audioContext.sampleRate;
+    debug('AudioContext sample rate: ' + actualSampleRate);
+    
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+    
+    // 3. 设置 AudioWorklet
+    const workletBlob = new Blob([workletCode], { type: 'application/javascript' });
+    const workletUrl = URL.createObjectURL(workletBlob);
+    await audioContext.audioWorklet.addModule(workletUrl);
+    debug('AudioWorklet module loaded');
+    
+    sourceNode = audioContext.createMediaStreamSource(mediaStream);
+    workletNode = new AudioWorkletNode(audioContext, 'pcm-capture', {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      channelCount: 1,
+    });
+    
+    workletNode.port.onmessage = (e) => {
+      // 只有在 chatReady 之后才发送音频
+      if (isConnected && chatReady && !isMuted) {
+        const base64 = arrayBufferToBase64(e.data);
+        sendEvent('input_audio_buffer.append', { delta: base64 });
+      }
+    };
+    
+    sourceNode.connect(workletNode);
+    debug('Audio pipeline ready');
+    
+    // 4. 连接 WebSocket
+    debug('Connecting to WebSocket...');
+    isConnected = true;
+    
+    ws = new WebSocket(getWSUrl());
+    
+    ws.onopen = () => {
+      debug('WebSocket connected, sending chat.update...');
+      setStatus('配置中…', 'connecting');
+      // 发送 chat.update 配置事件
+      sendChatUpdate();
+    };
+    
+    ws.onmessage = handleWebSocketMessage;
+    
+    ws.onerror = (error) => {
+      debug('WebSocket error: ' + JSON.stringify(error));
+      setStatus('连接错误', 'error');
+    };
+    
+    ws.onclose = (event) => {
+      debug('WebSocket closed: code=' + event.code + ' reason=' + event.reason);
+      isConnected = false;
+      chatReady = false;
+      if (event.code === 1006) {
+        setStatus('连接断开（可能是PAT无效或Bot未发布API）', 'error');
+      } else if (event.code === 4001 || event.code === 4003) {
+        setStatus('认证失败（PAT可能已过期）', 'error');
+      } else {
+        setStatus('已断开', '');
+      }
+      connectBtn.textContent = '连接语音';
+      connectBtn.classList.remove('connected');
+      muteBtn.disabled = true;
+      muteBtn.classList.remove('active');
+      muteBtn.textContent = '静音';
+      isMuted = false;
+      cleanupAudio();
+    };
+    
+  } catch (error) {
+    debug('Connection failed: ' + error.message);
+    setStatus('连接失败: ' + error.message, 'error');
+    connectBtn.textContent = '连接语音';
+    isConnected = false;
+    cleanupAudio();
+  }
+}
+
+function disconnect() {
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+  cleanupAudio();
+  isConnected = false;
+  chatReady = false;
+}
+
+function cleanupAudio() {
+  if (workletNode) { workletNode.disconnect(); workletNode = null; }
+  if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+  if (mediaStream) {
+    mediaStream.getTracks().forEach(t => t.stop());
+    mediaStream = null;
+  }
+  nextPlayTime = 0;
+}
+
+// ===== 事件绑定 =====
+muteBtn.addEventListener('click', () => {
+  isMuted = !isMuted;
+  if (isMuted) {
+    muteBtn.classList.add('active');
+    muteBtn.textContent = '取消静音';
+    setStatus('已静音', '');
+  } else {
+    muteBtn.classList.remove('active');
+    muteBtn.textContent = '静音';
+    setStatus('已连接，请说话', 'connected');
+  }
+});
+
+connectBtn.addEventListener('click', connect);
+
+saveBtn.addEventListener('click', () => {
+  const val = patInput.value.trim();
+  if (!val) return;
+  PAT = val;
+  localStorage.setItem('coze_pat', val);
+  setupEl.style.display = 'none';
+  connectBtn.style.display = 'block';
+  connect();
+});
+
+patInput.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') saveBtn.click();
+});
+
+// ===== 防止息屏 =====
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch (e) {}
+}
+connectBtn.addEventListener('click', requestWakeLock);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && isConnected) {
+    requestWakeLock();
+  }
+});
+</script>
+</body>
+</html>
